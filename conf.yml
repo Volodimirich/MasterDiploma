@@ -1,0 +1,28 @@
+model:
+  model_type: 'GCNConv'
+  hidden_encoder_embed: 64
+  hidden_GCN_embed: 64
+  encoder_out: 256
+  allow_loops: True
+  #linear, long
+  emb_type: 'long'
+  div_val: 2
+  #none, only_train, only_param, full
+  pos_embed: 'none'
+  depth: 2
+  #Experiment with long embed
+  num_blocks: 3
+  iso_amount: 16
+  is_edges_trainable: True
+
+train_params:
+  batch_size: 60
+  device_num: 1
+#  'online', 'offline', 'disabled'
+  wandb_mode: 'online'
+
+files_params:
+  save_root: '/raid/data/cats_dogs_dataset/'
+  path_to_files: '/raid/data/cats_dogs_dataset/preprocessed/*/*.npy'
+
+exp_name: 'Trainable_existed'
