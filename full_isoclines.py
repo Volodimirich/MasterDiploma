@@ -138,47 +138,77 @@ class GNN(torch.nn.Module):
         self.b_size = b_size
         self.iso_amount = iso_amount
 
-        self.edge_weight = nn.Parameter(torch.tensor([float(ed) for ed in edge_weight])) if is_edges_trainable else None
-
+        self.edge_weight_amp = nn.Parameter(torch.tensor([float(ed) for ed in edge_weight])) if is_edges_trainable else None
+        self.edge_weight_ph = nn.Parameter(torch.tensor([float(ed) for ed in edge_weight])) if is_edges_trainable else None
 
         if depth not in [1, 2]:
             raise ValueError
 
-        self.layers = create_layers(size, num_blocks=num_blocks, hidden=hidden_encoder, tp=emb_type,
-                                    out=encoder_out, div_val=div_val, isoclines=self.iso_amount)
+        self.layers_amp = create_layers(size, num_blocks=num_blocks, hidden=hidden_encoder, tp=emb_type,
+                                        out=encoder_out, div_val=div_val, isoclines=self.iso_amount)
+        self.layers_ph = create_layers(size, num_blocks=num_blocks, hidden=hidden_encoder, tp=emb_type,
+                                       out=encoder_out, div_val=div_val, isoclines=self.iso_amount)
         self.pos_embed = nn.Parameter(torch.zeros(b_size, 21 * self.iso_amount, hidden_encoder))
         # self.conv1 = SAGEConv(hidden_GCN, hidden_GCN)
-        self.conv1 = GCNConv(hidden_GCN, hidden_GCN)
+        self.conv1_amp = SAGEConv(hidden_GCN, hidden_GCN)
+        self.conv1_ph = SAGEConv(hidden_GCN, hidden_GCN)
+
         if depth == 2:
-            self.conv2 = GCNConv(hidden_GCN, hidden_GCN)
+            self.conv2_amp = GCNConv(hidden_GCN, hidden_GCN)
+            self.conv2_ph = GCNConv(hidden_GCN, hidden_GCN)
+
+        # self.basic_conf_amp = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=1)
+        # self.basic_conf_ph = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=1)
+
+        self.conv1d = nn.Conv1d(in_channels=2, out_channels=1, kernel_size=1)
         self.lin = nn.Linear(hidden_GCN, num_classes)
         self.soft = nn.Softmax(dim=1)
 
-    def forward(self, x, edge_index, batch, batch_size):
+    def forward(self, amp, ph, edge_index, batch, batch_size):
         if self.emb_type == 'linear':
-            x = get_embedding(x, self.layers, iso_amount=self.iso_amount, batch_size=batch_size)  # current linear
+            amp = get_embedding(amp, self.layers_amp, iso_amount=self.iso_amount, batch_size=batch_size)  # current linear
+            ph = get_embedding(ph, self.layers_ph, iso_amount=self.iso_amount, batch_size=batch_size)  # current linear
         elif self.emb_type == 'long':
-            x = get_long_embedding(x, self.layers, iso_amount=self.iso_amount, batch_size=batch_size)
+            amp = get_long_embedding(amp, self.layers_amp, iso_amount=self.iso_amount, batch_size=batch_size)
+            ph = get_long_embedding(ph, self.layers_ph, iso_amount=self.iso_amount, batch_size=batch_size)
 
         if self.is_pos_embed == 'only_train':
-            x = add_positional_encoding(x, emb_len=self.enc_out)
+            amp = add_positional_encoding(amp, emb_len=self.enc_out)
+            ph = add_positional_encoding(ph, emb_len=self.enc_out)
         elif self.is_pos_embed == 'only_param':
-            x += self.pos_embed
+            amp += self.pos_embed
+            ph += self.pos_embed
         elif self.is_pos_embed == 'full':
-            x = add_positional_encoding(x, emb_len=self.enc_out) + self.pos_embed
+            amp = add_positional_encoding(amp, emb_len=self.enc_out) + self.pos_embed
+            ph = add_positional_encoding(ph, emb_len=self.enc_out) + self.pos_embed
         # Maybe add this in get_embedding?
-        x = x.view(batch_size * 21 * self.iso_amount, -1)
-        edges = self.edge_weight.repeat(self.b_size).sigmoid() if self.edge_weight is not None else None
+        amp = amp.view(batch_size * 21 * self.iso_amount, -1)
+        ph = ph.view(batch_size * 21 * self.iso_amount, -1)
 
-        x = self.conv1(x, edge_index, edges)
+        if self.edge_weight_amp is not None:
+            edges_amp = self.edge_weight_amp.repeat(self.b_size).sigmoid()
+            edges_ph = self.edge_weight_ph.repeat(self.b_size).sigmoid()
+        else:
+            edges_amp, edges_ph = None, None
+        # amp = self.conv1_amp(amp, edge_index, edges_amp).relu()
+        amp = self.conv1_amp(amp, edge_index).relu()
+        # ph = self.conv1_ph(ph, edge_index, edges_ph).relu()
+        ph = self.conv1_ph(ph, edge_index).relu()
         # x = self.conv1(x, edge_index)
-        x = x.relu()
         if self.depth == 2:
-            x = self.conv2(x, edge_index, edges)
-            # x = self.conv2(x, edge_index)
-            x = x.relu()
-        # x = self.conv2(x, edge_index)
-        x = global_mean_pool(x, batch)  # [batch_size, hidden_channels]
+            amp = self.conv2_amp(amp, edge_index).relu()
+            # amp = self.conv2_amp(amp, edge_index, edges_amp).relu()
+            ph = self.conv2_ph(ph, edge_index).relu()
+            # ph = self.conv2_ph(ph, edge_index, edges_ph).relu()
+        # CONV1D HERE
+
+        amp = global_mean_pool(amp, batch)  # [batch_size, hidden_channels]
+        ph = global_mean_pool(ph, batch)
+
+
+        # x = torch.cat([self.basic_conf_amp(amp.unsqueeze(1)), self.basic_conf_ph(ph.unsqueeze(1))], 1)
+        x = torch.cat([amp.unsqueeze(1), ph.unsqueeze(1)], 1)
+        x = self.conv1d(x).squeeze()
         x = F.dropout(x, p=0.1, training=self.training)
         x = self.lin(x)
         return self.soft(x)
@@ -208,7 +238,7 @@ class MyOwnDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        return [f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}_isoc={self.iso_amount}' \
+        return [f'full_data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}_isoc={self.iso_amount}' \
                 f'_split={self.split_amount}.pt' for idx in range(self.gl_count)]
 
     def _create_cco_matrix(self):
@@ -237,8 +267,8 @@ class MyOwnDataset(Dataset):
             if adj_matrix[iy, ix] != 0:
                 source_nodes.append(ix)
                 target_nodes.append(iy)
-            # edge_list.append(adj_matrix[iy, ix])
-            # if adj_matrix[iy, ix] != 0:
+                # edge_list.append(adj_matrix[iy, ix])
+                # if adj_matrix[iy, ix] != 0:
                 # unweighted solution
                 edge_list.append(1.0)
         return source_nodes, target_nodes, edge_list
@@ -258,27 +288,25 @@ class MyOwnDataset(Dataset):
             #                               f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
             #                               f'_isoc={self.iso_amount}_split={self.split_amount}.pt')):
             #     print('skip')
-                # continue
+            # continue
             # Read data from `raw_path`.
             amp, phase, target = np.load(file, allow_pickle=True)
             try:
                 amp = [torch.tensor(item).float() for item in amp]
-                # lst = [torch.from_numpy(item).float() for item in lst]
+                ph = [torch.tensor(item).float() for item in phase]
 
-                # temporary only amp|
                 data = Data(x=amp,
-                            # edge_index=torch.tensor(edge_idx).clone().detach().float().requires_grad_(True),
                             edge_index=edge_idx,
                             edge_attrs=edge_list,
-                            y=torch.tensor([target]))
+                            y=torch.tensor([target]),
+                            ph=ph)
                 torch.save(data, osp.join(self.processed_dir,
-                                          f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
+                                          f'full_data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
                                           f'_isoc={self.iso_amount}_split={self.split_amount}.pt'))
 
                 idx += 1
             except:
                 continue
-        print(idx)
         self.gl_count = idx
 
     def len(self):
@@ -287,7 +315,7 @@ class MyOwnDataset(Dataset):
     def get(self, idx):
         data = torch.load(
             osp.join(self.processed_dir,
-                     f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
+                     f'full_data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
                      f'_isoc={self.iso_amount}_split={self.split_amount}.pt'))
 
         return data
@@ -300,21 +328,19 @@ class GraphInformation:
         self.adj_matrix = self._get_adj()
         self.G = nx.from_numpy_array(self.adj_matrix)
 
-
     def _get_adj(self):
         _, edge_amount = self.graph_struct.shape
         self.max_val = np.amax(self.graph_struct)
-        adj_matrix = np.zeros((self.max_val + 1,  self.max_val + 1))
+        adj_matrix = np.zeros((self.max_val + 1, self.max_val + 1))
         for i in range(edge_amount):
             x, y = self.graph_struct[..., i]
             adj_matrix[x][y] = 1
             adj_matrix[y][x] = 1
         return adj_matrix
 
-
     def get_adj_view(self, connectivity_array):
         _, edge_amount = self.graph_struct.shape
-        image = np.zeros((self.max_val + 1,  self.max_val + 1))
+        image = np.zeros((self.max_val + 1, self.max_val + 1))
         for i in range(edge_amount):
             x, y = self.graph_struct[..., i]
             image[x][y] = connectivity_array[i]
@@ -331,7 +357,6 @@ class GraphInformation:
         nx.draw_circular(self.G, ax=ax, edge_color=colors)
         fig.savefig(im_io, format='png')
         return Image.open(im_io)
-
 
 
 def get_config(path):
@@ -398,24 +423,23 @@ if __name__ == '__main__':
     )
     weights_stem = f'{config["exp_name"]}'
     wandb.run.name = weights_stem
+    print(train_dataset[0].edge_index.shape)
     GraphLogger = GraphInformation(train_dataset[0].edge_index) if model_params['is_edges_trainable'] else None
     adj_hist, adj_counter = [], 0
 
     def train():
-
         model.train()
         for itt, data in enumerate(train_loader):  # Iterate in batches over the training dataset.
             optimizer.zero_grad()  # Clear gradients.
 
             data = data.to(device)
-            out = model(data.x, data.edge_index, data.batch, batch_size)  # Perform a single forward pass.
+            out = model(data.x, data.ph, data.edge_index, data.batch, batch_size)  # Perform a single forward pass.
             loss = criterion(out, data.y)  # Compute the loss.
             if itt % 100 == 0:
                 wandb.log({"train_cross_entropy_loss": loss.item()})
 
             loss.backward()  # Derive gradients.
-            optimizer.step()  # Update parameters based on gradients.
-
+            optimizer.step()  # Update parameters based on gradients
         if GraphLogger:
             adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
             adj_hist.append(adj_view)
@@ -424,40 +448,31 @@ if __name__ == '__main__':
             img.close()
             wandb.log(
                 {'Train view': wandb.Image(GraphLogger.get_matrix_view(img), caption='Train graph view')})
-
 
     def test(loader):
         model.eval()
         correct = 0
-        adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
-        wandb.log(
-            {'Test adj': wandb.Image(adj_view, caption='Test Adj view')})
-        img = GraphLogger.get_matrix_view(adj_view)
-        wandb.log(
-            {'Test view': wandb.Image(img, caption='Test graph view')})
-        img.close()
 
         for itt, data in enumerate(loader):  # %Iterate in batches over the training/test dataset.
             data = data.to(device)
-            out = model(data.x, data.edge_index, data.batch, batch_size)  # Perform a single forward pass.
+            out = model(data.x, data.ph, data.edge_index, data.batch, batch_size)  # Perform a single forward pass.
             data = data.to(device)
             pred = out.argmax(dim=1)  # Use the class with highest probability.
             correct += int((pred == data.y).sum())  # Check against ground-truth labels.
-        adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
-        #
         if GraphLogger:
             adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
-            adj_hist.append(adj_view)
-            img = GraphLogger.get_matrix_view(adj_view)
-            wandb.log({'Train adj': wandb.Image(adj_view, caption='Train Adj view')})
-            img.close()
+            #
             wandb.log(
-                {'Train view': wandb.Image(GraphLogger.get_matrix_view(img), caption='Train graph view')})
+                {'Test adj': wandb.Image(adj_view, caption='Test Adj view')})
+            img = GraphLogger.get_matrix_view(adj_view)
+            wandb.log(
+                {'Test view': wandb.Image(img, caption='Test graph view')})
+            img.close()
         return correct / len(loader.dataset)  # Derive ratio of correct predictions.
 
 
     best_train, cur_epoch, best_val = -1, -1, -1
-    for epoch in tqdm(range(1, 50)):
+    for epoch in tqdm(range(0, 50)):
         train()
         train_acc = test(train_loader)
         test_acc = test(test_loader)
@@ -469,11 +484,13 @@ if __name__ == '__main__':
 
         wandb.log({'current train accuracy': train_acc})
         wandb.log({'current test accuracy': test_acc})
+
         if epoch % 10:
             with open(f'pickles/adj_train{adj_counter}.pkl', 'wb') as f:
                 pickle.dump(adj_hist, f)
                 adj_counter += 1
 
         print(f'Epoch: {epoch:03d}, Train Acc: {train_acc:.4f}, Test Acc: {test_acc:.4f}')
+
 
     print(f'Best test accuracy - {best_val} on epoch {cur_epoch} with train accuracy -> {best_train}')
