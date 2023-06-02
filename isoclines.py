@@ -2,7 +2,6 @@ import io
 import pickle
 
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 from sklearn.model_selection import train_test_split
 import os.path as osp
@@ -137,7 +136,6 @@ class GNN(torch.nn.Module):
         self.emb_type = emb_type
         self.b_size = b_size
         self.iso_amount = iso_amount
-
         self.edge_weight = nn.Parameter(torch.tensor([float(ed) for ed in edge_weight])) if is_edges_trainable else None
 
 
@@ -195,7 +193,11 @@ class MyOwnDataset(Dataset):
         # TODO fix this shit
         self.iso_amount = iso_amount
         self.split_amount = split_amount
-        self.gl_count = 17410 if self.is_train else 7462
+        # 4099 and 1757
+        # 15015579 sum
+        # self.gl_count = 17409 if self.is_train else 7461
+        self.gl_count = 5270 if self.is_train else 586
+
         super().__init__(root, transform, pre_transform, pre_filter)
 
     @property
@@ -237,10 +239,11 @@ class MyOwnDataset(Dataset):
             if adj_matrix[iy, ix] != 0:
                 source_nodes.append(ix)
                 target_nodes.append(iy)
+                edge_list.append(1.0)
             # edge_list.append(adj_matrix[iy, ix])
             # if adj_matrix[iy, ix] != 0:
                 # unweighted solution
-                edge_list.append(1.0)
+                # edge_list.append(1.0)
         return source_nodes, target_nodes, edge_list
 
     def process(self):
@@ -250,9 +253,10 @@ class MyOwnDataset(Dataset):
         # DEBUG ROW
         # _, small_data = train_test_split(self.data, test_size=0.1, random_state=42)
         small_data = self.data
-        train_data, test_data = train_test_split(small_data, test_size=0.3, random_state=42)
-        print(len(train_data), len(test_data))
+        train_data, test_data = train_test_split(small_data, test_size=0.1, random_state=42)
         data = train_data if self.is_train else test_data
+        # p;rint(edge_list)
+
         for file in data:
             # if os.path.exists(osp.join(self.processed_dir,
             #                               f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
@@ -269,7 +273,7 @@ class MyOwnDataset(Dataset):
                 data = Data(x=amp,
                             # edge_index=torch.tensor(edge_idx).clone().detach().float().requires_grad_(True),
                             edge_index=edge_idx,
-                            edge_attrs=edge_list,
+                            edge_attr=edge_list,
                             y=torch.tensor([target]))
                 torch.save(data, osp.join(self.processed_dir,
                                           f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
@@ -278,8 +282,8 @@ class MyOwnDataset(Dataset):
                 idx += 1
             except:
                 continue
-        print(idx)
         self.gl_count = idx
+        print(self.gl_count)
 
     def len(self):
         return len(self.processed_file_names)
@@ -356,7 +360,7 @@ if __name__ == '__main__':
                                  split_amount=21 if model_params['num_blocks'] == 3 else 85)
     test_dataset = MyOwnDataset(save_root, files, is_train=False, iso_amount=model_params['iso_amount'],
                                 split_amount=21 if model_params['num_blocks'] == 3 else 85)
-    graph = train_dataset[0].edge_attrs
+    graph = train_dataset[0].edge_attr
 
     model = GNN(num_classes=2, hidden_encoder=model_params['hidden_encoder_embed'], edge_weight=graph,
                 hidden_GCN=model_params['hidden_GCN_embed'], encoder_out=model_params['encoder_out'],
@@ -366,8 +370,9 @@ if __name__ == '__main__':
                 b_size=train_params['batch_size'], is_edges_trainable=model_params['is_edges_trainable']).to(device)
     # print(model.parameters)
     # for name, param in model.named_parameters():
-    #     print(name, param.shape, param.numel())
-    # print(sum(p.numel() for p in model.parameters()), 'sum')
+        # print(name, param.shape, param.numel())
+    print(sum(p.numel() for p in model.parameters()), 'sum')
+    # exit(0)
     optimizer = torch.optim.AdamW(model.parameters())
     criterion = torch.nn.CrossEntropyLoss()
     scheduler = ReduceLROnPlateau(optimizer, 'min')
@@ -416,7 +421,7 @@ if __name__ == '__main__':
             loss.backward()  # Derive gradients.
             optimizer.step()  # Update parameters based on gradients.
 
-        if GraphLogger:
+        if GraphLogger and False:
             adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
             adj_hist.append(adj_view)
             img = GraphLogger.get_matrix_view(adj_view)
@@ -429,13 +434,6 @@ if __name__ == '__main__':
     def test(loader):
         model.eval()
         correct = 0
-        adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
-        wandb.log(
-            {'Test adj': wandb.Image(adj_view, caption='Test Adj view')})
-        img = GraphLogger.get_matrix_view(adj_view)
-        wandb.log(
-            {'Test view': wandb.Image(img, caption='Test graph view')})
-        img.close()
 
         for itt, data in enumerate(loader):  # %Iterate in batches over the training/test dataset.
             data = data.to(device)
@@ -443,9 +441,9 @@ if __name__ == '__main__':
             data = data.to(device)
             pred = out.argmax(dim=1)  # Use the class with highest probability.
             correct += int((pred == data.y).sum())  # Check against ground-truth labels.
-        adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
+        # adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
         #
-        if GraphLogger:
+        if GraphLogger and False:
             adj_view = GraphLogger.get_adj_view(model.edge_weight.detach())
             adj_hist.append(adj_view)
             img = GraphLogger.get_matrix_view(adj_view)
@@ -457,13 +455,26 @@ if __name__ == '__main__':
 
 
     best_train, cur_epoch, best_val = -1, -1, -1
-    for epoch in tqdm(range(1, 50)):
+    for epoch in tqdm(range(1, 100)):
         train()
         train_acc = test(train_loader)
         test_acc = test(test_loader)
         scheduler.step(test_acc)
-        best_train = train_acc if train_acc > best_train else best_train
-        best_val = test_acc if test_acc > best_val else best_val
+        if train_acc > best_train:
+            best_train = train_acc 
+            if test_acc > best_val:
+                dict_vals = {}
+                for pos, (x, y) in enumerate(zip(train_dataset[0].edge_index[0][:4009], train_dataset[0].edge_index[1][:4009])):
+                    dict_vals[(x.item(), y.item())] = model.edge_weight[pos].item()
+                file_name = f"dicts/dct_isoclines_none_hid={model_params['hidden_GCN_embed']}_out={model_params['encoder_out']}_enc={model_params['hidden_encoder_embed']}.pkl"
+                with open(file_name, 'wb') as f:
+                    dict_vals = dict(sorted(dict_vals.items(), key=lambda item: item[1], reverse=True))
+                    pickle.dump(dict_vals, f)
+                best_val = test_acc 
+            cur_epoch = epoch
+       
+                    
+            
         wandb.log({'best train accuracy': best_train})
         wandb.log({'best test accuracy': best_val})
 

@@ -307,7 +307,7 @@ if __name__ == '__main__':
     model_type = config['model']['model_type']
     emb_type = config['model']['emb_type']
     save_root = '/raid/data/cats_dogs_dataset/'
-    files = glob.glob('/raid/data/cats_dogs_dataset/preprocessed/*/*.npy', recursive=True)
+    files = glob.glob('/raid/data/cats_dogs_dataset/preprocessed_сгкс/*/*.npy', recursive=True)
     train_dataset = MyOwnDataset(save_root, files, is_train=True, allow_loops=allow_loops)
     test_dataset = MyOwnDataset(save_root, files, is_train=False, allow_loops=allow_loops)
 

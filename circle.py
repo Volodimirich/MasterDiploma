@@ -4,18 +4,22 @@ import os.path as osp
 import glob
 import torch
 import torch.nn as nn
+import pickle
 import numpy as np
+from tqdm import tqdm
+
 from yaml import safe_load
 from sklearn.model_selection import train_test_split
 from torch_geometric.nn import GCNConv,SAGEConv
 from torch_geometric.loader import DataLoader
+import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
 import wandb
 
 
 SIZE = 256
-files = glob.glob('/raid/data/cats_dogs_dataset/preprocessed/*/*.npy', recursive=True)
-device = torch.device('cuda:0')
+# files = glob.glob('/raid/data/cats_dogs_dataset/preprocessed/*/*.npy', recursive=True)
+# device = torch.device('cuda:0')
 
 def create_circular(h, w, max_numb=None, center=None, tolerance=1, min_val=0):
     if center is None:  # use the middle of the image
@@ -79,7 +83,6 @@ class LinearAutoEncoder(torch.nn.Module):
 
 def create_layers(img_shape, split_coefs=None, hidden=32, out=10, tp='linear'):
     layers = nn.ModuleList()
-
     if split_coefs is None:
         split_coefs = [1, 2, 4]
 
@@ -90,7 +93,7 @@ def create_layers(img_shape, split_coefs=None, hidden=32, out=10, tp='linear'):
             for _ in range(img_shape // (2 * coef)):
                 # Linear
                 if tp == 'linear':
-                    layers.append(LinearAutoEncoder(input_layers, hidden, out))
+                    layers.append(LinearAutoEncoder(input_layers, hidden, out).to(device))
                     input_layers += 8
                 elif tp == 'conv':
                     layers.append(ConvAutoEncoder(input_layers, out, hidden=hidden).to(device))
@@ -129,16 +132,17 @@ def get_embedding(data, layers, border=None, neural_type='linear'):
             max_value = value_map[-1][-1].astype(int)
 
             for rad in range(min_value, max_value + 1):
-                values = torch.from_numpy(data_map[value_map == rad]).float().to(device)
+                values = data_map[value_map == rad]
                 if neural_type == 'linear':
                     node_embeddings.append(layers[rad](values))
                 elif neural_type == 'conv':
-                    values2d = torch.from_numpy(reshape_2d(values, border[rad])).float()
+                    values2d = torch.from_numpy(reshape_2d(values, border[rad])).float().to(device)
                     values2d = values2d.unsqueeze(0)
                     node_embeddings.append(layers[rad](values2d))
             min_value = max_value + 1
+
         result.append(torch.stack(node_embeddings))
-    return torch.stack(result)
+    return torch.stack(result).to(device)
 
 
 def reshape_2d(array, border_size):
@@ -174,37 +178,42 @@ def create_border_leng(img_shape, split_coefs=None):
     return border_leng
 
 class GCN(torch.nn.Module):
-    def __init__(self, hidden_channels, num_classes, edge_weight, size=256, out=10, emb_type='linear', model_type='GCN', is_edges_trainable=True):
+    # def __init__(self, hidden_channels, num_classes, edge_weight, 
+                #  size=256, out=10, emb_type='linear', model_type='GCN', is_edges_trainable=True):
+    def __init__(self, hidden_encoder, hidden_GCN, num_classes, edge_weight, size=256,
+            encoder_out=10, emb_type='conv', div_val=2, is_pos_embed='full', depth=1,
+            num_blocks=3, iso_amount=16, b_size=60, is_edges_trainable=True):
         super(GCN, self).__init__()
+        self.batch_size = b_size
+        model_type = 'GCN'
         torch.manual_seed(12345)
-        self.neural_type = emb_type
+        self.neural_type = 'conv'
         #
-        self.layers = create_layers(size, tp=emb_type, out=out)
+        self.layers = create_layers(size, tp=self.neural_type, out=hidden_encoder)
         self.edge_weight = nn.Parameter(torch.tensor([float(ed) for ed in edge_weight])) if is_edges_trainable else None
 
 
-        if emb_type == 'conv':
+        if  self.neural_type == 'conv':
             self.border = create_border_leng(size)
         else:
             self.border = None
 
         if model_type == 'GCN':
-            self.conv1 = GCNConv(out, hidden_channels)
-            self.conv2 = GCNConv(hidden_channels, hidden_channels)
-        elif model_type == 'SAGE':
-            self.conv1 = SAGEConv(out, hidden_channels)
-            self.conv2 = SAGEConv(hidden_channels, hidden_channels)
+            self.conv1 = GCNConv(hidden_encoder, hidden_GCN)
+            self.conv2 = GCNConv(hidden_GCN, hidden_GCN)
+        # elif model_type == 'SAGE':
+            # self.conv1 = SAGEConv(out, hidden_channels)
+            # self.conv2 = SAGEConv(hidden_channels, hidden_channels)
 
-        self.lin = nn.Linear(hidden_channels, num_classes)
+        self.lin = nn.Linear(hidden_GCN, num_classes)
         self.soft = nn.Softmax(dim=1)
 
     def forward(self, x, edge_index, batch):
+        edge_index, batch = edge_index.to(device), batch.to(device)
         x = get_embedding(x, self.layers, self.border, neural_type=self.neural_type)  # current linear
-
         # x.view(batch_size * num_nodes, -1
-        x = x.view(batch_size * 896, -1)
-        edges = self.edge_weight.repeat(self.b_size).sigmoid() if self.edge_weight is not None else None
-
+        x = x.view(self.batch_size * 896, -1)
+        edges = self.edge_weight.repeat(self.batch_size).sigmoid() if self.edge_weight is not None else None
         x = self.conv1(x, edge_index, edges)
         x = x.relu()
         x = self.conv2(x, edge_index, edges)
@@ -234,7 +243,7 @@ class MyOwnDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        return [f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}.pt' for idx in range(self.gl_count)]
+        return [f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}_circ_basic.pt' for idx in range(self.gl_count)]
 
     def _create_cco_matrix(self):
         result = split_tensor(SIZE)
@@ -282,18 +291,18 @@ class MyOwnDataset(Dataset):
             data = Data(x=amp,
                         # edge_index=torch.tensor(edge_idx).clone().detach().float().requires_grad_(True),
                         edge_index=edge_idx,
-                        edge_attrs=edge_list,
+                        edge_attr=edge_list,
                         y=torch.tensor([target]))
 
-            torch.save(data, osp.join(self.processed_dir, f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}.pt'))
+            torch.save(data, osp.join(self.processed_dir, f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}_circ_basic.pt'))
             idx += 1
         self.gl_count = idx
-
+        print(self.gl_count)
     def len(self):
         return len(self.processed_file_names)
 
     def get(self, idx):
-        data = torch.load(osp.join(self.processed_dir, f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}.pt'))
+        data = torch.load(osp.join(self.processed_dir, f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}_circ_basic.pt'))
         return data
 
 def get_config(path):
@@ -304,26 +313,59 @@ def get_config(path):
 
 if __name__ == '__main__':
     config = get_config('conf.yml')
-    model_type = config['model']['model_type']
-    emb_type = config['model']['emb_type']
-    save_root = '/raid/data/cats_dogs_dataset/'
-    files = glob.glob('/raid/data/cats_dogs_dataset/preprocessed/*/*.npy', recursive=True)
-    train_dataset = MyOwnDataset(save_root, files, is_train=True, allow_loops=allow_loops)
-    test_dataset = MyOwnDataset(save_root, files, is_train=False, allow_loops=allow_loops)
+    train_params = config['train_params']
+    model_params = config['model']
+    files_params = config['files_params']
 
-    model = GCN(num_classes=2, hidden_channels=10, model_type=model_type, emb_type=emb_type).to(device)
+    # save_root = '/raid/data/cats_dogs_dataset/'
+    device = torch.device(f'cuda:{train_params["device_num"]}')
+    batch_size = config['train_params']['batch_size']
+
+    save_root = '/raid/data/cats_dogs_dataset/'
+    files = glob.glob(files_params['path_to_files'], recursive=True)
+
+    train_dataset = MyOwnDataset(save_root, files, is_train=True, allow_loops=model_params['allow_loops'])
+    test_dataset = MyOwnDataset(save_root, files, is_train=False, allow_loops=model_params['allow_loops'])
+    graph = train_dataset[0].edge_attr
+    # model = GCN(num_classes=2, hidden_channels=10, model_type=model_type, 
+                # emb_type=emb_type, edge_weight=graph).to(device)
+    
+    model = GCN(num_classes=2, hidden_encoder=model_params['hidden_encoder_embed'], edge_weight=graph,
+            hidden_GCN=model_params['hidden_GCN_embed'], encoder_out=model_params['encoder_out'],
+            emb_type=model_params['emb_type'], div_val=model_params['div_val'],
+            is_pos_embed=model_params['pos_embed'], depth=model_params['depth'],
+            num_blocks=model_params['num_blocks'], iso_amount=model_params['iso_amount'],
+            b_size=train_params['batch_size'], is_edges_trainable=model_params['is_edges_trainable']).to(device)
+    print(sum(p.numel() for p in model.parameters()), 'sum')
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.001)
     criterion = torch.nn.CrossEntropyLoss()
-    print(sum(p.numel() for p in model.parameters()), 'sum')
-    batch_size = 40
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
+    wandb_config = dict(
+        batch_size=batch_size,
+        emb_type=model_params['emb_type'],
+        architecture=model_params['model_type'],
+        number_of_layers=model_params['depth'],
+        is_pos_embed=model_params['pos_embed'],
+        hidden_GCN=model_params['hidden_GCN_embed'],
+        encoder_out=model_params['encoder_out'],
+        div_val=model_params['div_val'],
+        hidden_encoder=model_params['hidden_encoder_embed'],
+        num_blocks=model_params['num_blocks'],
+        iso_amount=model_params['iso_amount'],
+        is_edges_trainable=model_params['is_edges_trainable']
+    )
 
-
-    wandb.init(project="GNN")
-    weights_stem = f'GNN_{model_type}_Conv_allow_loops={allow_loops}_bsize=1'
+    wandb.init(
+        project="GNN",
+        notes="Deeper network, with pos embedding with trainable",
+        config=wandb_config,
+        mode=train_params['wandb_mode']
+    )
+    weights_stem = f'{config["exp_name"]}'
     wandb.run.name = weights_stem
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
 
 
     #                 experiment.log_metric("train_dice_loss", batch_loss.item(),
@@ -335,10 +377,10 @@ if __name__ == '__main__':
             #         out = model(data.x, data.edge_index, data.batch)
             optimizer.zero_grad()  # Clear gradients.
 
-            data = data.to(device)
+            # data = data.to(device)
             out = model(data.x, data.edge_index, data.batch)  # Perform a single forward pass.
-            loss = criterion(out, data.y)  # Compute the loss.
-            print(out, loss)
+            
+            loss = criterion(out, data.y.to(device))  # Compute the loss.
             if itt % 100 == 0:
                 wandb.log({"train_cross_entropy_loss": loss.item()})
             loss.backward()  # Derive gradients.
@@ -350,7 +392,7 @@ if __name__ == '__main__':
         correct = 0
         for itt, data in enumerate(loader):  # %ђIterate in batches over the training/test dataset.
             data = data.to(device)
-            out = model(data.x, data.edge_index, data.edge_list, data.batch)  # Perform a single forward pass
+            out = model(data.x, data.edge_index, data.batch)  # Perform a single forward pass
             pred = out.argmax(dim=1)  # Use the class with highest probability.
             correct += int((pred == data.y).sum())  # Check against ground-truth labels.
         #         correct += int((pred == data.y>.squeeze().unsqueeze(0).float()).sum())  # Check against ground-truth labels.
@@ -358,12 +400,23 @@ if __name__ == '__main__':
 
 
     best_train, cur_epoch, best_val = -1, -1, -1
-    for epoch in range(1, 50):
+    for epoch in tqdm(range(1, 50)):
         train()
         train_acc = test(train_loader)
         test_acc = test(test_loader)
         best_train, cur_epoch, best_val = (train_acc, epoch, test_acc) if test_acc > best_val \
             else (best_train, cur_epoch, best_val)
+        if train_acc > best_train:
+            dict_vals = {}
+            for pos, (x, y) in enumerate(zip(train_dataset[0].edge_index[0][:4009], train_dataset[0].edge_index[1][:4009])):
+                dict_vals[(x.item(), y.item())] = model.edge_weight[pos].item()
+            file_name = f"dicts/dct_circle_hid={model_params['hidden_GCN_embed']}_out={model_params['encoder_out']}_enc={model_params['hidden_encoder_embed']}.pkl"
+            with open(file_name, 'wb') as f:
+                dict_vals = dict(sorted(dict_vals.items(), key=lambda item: item[1], reverse=True))
+                pickle.dump(dict_vals, f)
+            best_train = train_acc 
+            best_val = test_acc 
+            cur_epoch = epoch
         wandb.log({'best train accuracy': best_train})
         wandb.log({'best test accuracy': best_val})
 
