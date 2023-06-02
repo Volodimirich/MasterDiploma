@@ -101,25 +101,6 @@ def create_layers(img_shape, split_coefs=None, hidden=32, out=10, tp='linear'):
 
     return layers
 
-#
-# def get_embedding(data, layers, border=None, neural_type='linear'):
-#     min_value = 0
-#     node_embeddings = []
-#     for data_map, value_map in zip(data, global_map):
-#         value_map = value_map.astype(int)
-#         max_value = value_map[-1][-1].astype(int)
-#
-#         for rad in range(min_value, max_value + 1):
-#             values = data_map[value_map == rad]
-#             if neural_type == 'linear':
-#                 values = torch.from_numpy(values).float().to(device)
-#                 node_embeddings.append(layers[rad](values))
-#             elif neural_type == 'conv':
-#                 values2d = torch.from_numpy(reshape_2d(values, border[rad])).float().to(device)
-#                 values2d = values2d.unsqueeze(0)
-#                 node_embeddings.append(layers[rad](values2d))
-#         min_value = max_value + 1
-#     return torch.stack(node_embeddings)
 
 
 def get_embedding(data, layers, border=None, neural_type='linear'):
@@ -178,8 +159,6 @@ def create_border_leng(img_shape, split_coefs=None):
     return border_leng
 
 class GCN(torch.nn.Module):
-    # def __init__(self, hidden_channels, num_classes, edge_weight, 
-                #  size=256, out=10, emb_type='linear', model_type='GCN', is_edges_trainable=True):
     def __init__(self, hidden_encoder, hidden_GCN, num_classes, edge_weight, size=256,
             encoder_out=10, emb_type='conv', div_val=2, is_pos_embed='full', depth=1,
             num_blocks=3, iso_amount=16, b_size=60, is_edges_trainable=True):
@@ -368,16 +347,12 @@ if __name__ == '__main__':
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
 
 
-    #                 experiment.log_metric("train_dice_loss", batch_loss.item(),
-    #                                       epoch=epoch_idx, step=step_counter[action])
     def train():
         model.train()
         itt = 0
         for itt, data in enumerate(train_loader):  # Iterate in batches over the training dataset.
-            #         out = model(data.x, data.edge_index, data.batch)
             optimizer.zero_grad()  # Clear gradients.
 
-            # data = data.to(device)
             out = model(data.x, data.edge_index, data.batch)  # Perform a single forward pass.
             
             loss = criterion(out, data.y.to(device))  # Compute the loss.
@@ -395,7 +370,6 @@ if __name__ == '__main__':
             out = model(data.x, data.edge_index, data.batch)  # Perform a single forward pass
             pred = out.argmax(dim=1)  # Use the class with highest probability.
             correct += int((pred == data.y).sum())  # Check against ground-truth labels.
-        #         correct += int((pred == data.y>.squeeze().unsqueeze(0).float()).sum())  # Check against ground-truth labels.
         return correct / len(loader.dataset)  # Derive ratio of correct predictions.
 
 

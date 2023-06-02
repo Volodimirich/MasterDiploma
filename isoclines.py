@@ -63,12 +63,9 @@ class LinearAutoEncoder(torch.nn.Module):
             self.layers.append(nn.ReLU())
             inp *= div_val
 
-        # self.decoder = nn.Linear(hidden, out_features)
 
     def forward(self, x):
         x = self.layers(x)
-        # x = self.relu(x)
-        # return self.decoder(x)
         return x
 
 
@@ -169,13 +166,10 @@ class GNN(torch.nn.Module):
         edges = self.edge_weight.repeat(self.b_size).sigmoid() if self.edge_weight is not None else None
 
         x = self.conv1(x, edge_index, edges)
-        # x = self.conv1(x, edge_index)
         x = x.relu()
         if self.depth == 2:
             x = self.conv2(x, edge_index, edges)
-            # x = self.conv2(x, edge_index)
             x = x.relu()
-        # x = self.conv2(x, edge_index)
         x = global_mean_pool(x, batch)  # [batch_size, hidden_channels]
         x = F.dropout(x, p=0.1, training=self.training)
         x = self.lin(x)
@@ -193,8 +187,6 @@ class MyOwnDataset(Dataset):
         # TODO fix this shit
         self.iso_amount = iso_amount
         self.split_amount = split_amount
-        # 4099 and 1757
-        # 15015579 sum
         # self.gl_count = 17409 if self.is_train else 7461
         self.gl_count = 5270 if self.is_train else 586
 
@@ -240,10 +232,6 @@ class MyOwnDataset(Dataset):
                 source_nodes.append(ix)
                 target_nodes.append(iy)
                 edge_list.append(1.0)
-            # edge_list.append(adj_matrix[iy, ix])
-            # if adj_matrix[iy, ix] != 0:
-                # unweighted solution
-                # edge_list.append(1.0)
         return source_nodes, target_nodes, edge_list
 
     def process(self):
@@ -258,20 +246,11 @@ class MyOwnDataset(Dataset):
         # p;rint(edge_list)
 
         for file in data:
-            # if os.path.exists(osp.join(self.processed_dir,
-            #                               f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
-            #                               f'_isoc={self.iso_amount}_split={self.split_amount}.pt')):
-            #     print('skip')
-                # continue
             # Read data from `raw_path`.
             amp, phase, target = np.load(file, allow_pickle=True)
             try:
                 amp = [torch.tensor(item).float() for item in amp]
-                # lst = [torch.from_numpy(item).float() for item in lst]
-
-                # temporary only amp|
                 data = Data(x=amp,
-                            # edge_index=torch.tensor(edge_idx).clone().detach().float().requires_grad_(True),
                             edge_index=edge_idx,
                             edge_attr=edge_list,
                             y=torch.tensor([target]))

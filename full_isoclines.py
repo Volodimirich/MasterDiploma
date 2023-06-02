@@ -57,19 +57,15 @@ class LinearAutoEncoder(torch.nn.Module):
 
         self.layers.append(nn.Linear(inp, hidden))
         self.layers.append(nn.ReLU())
-        # self.relu = nn.ReLU()
 
         while inp * div_val < out_features:
             self.layers.append(nn.Linear(inp, inp * div_val))
             self.layers.append(nn.ReLU())
             inp *= div_val
 
-        # self.decoder = nn.Linear(hidden, out_features)
 
     def forward(self, x):
         x = self.layers(x)
-        # x = self.relu(x)
-        # return self.decoder(x)
         return x
 
 
@@ -150,8 +146,8 @@ class GNN(torch.nn.Module):
                                        out=encoder_out, div_val=div_val, isoclines=self.iso_amount)
         self.pos_embed = nn.Parameter(torch.zeros(b_size, 21 * self.iso_amount, hidden_encoder))
         # self.conv1 = SAGEConv(hidden_GCN, hidden_GCN)
-        self.conv1_amp = SAGEConv(hidden_GCN, hidden_GCN)
-        self.conv1_ph = SAGEConv(hidden_GCN, hidden_GCN)
+        self.conv1_amp = GCNConv(hidden_GCN, hidden_GCN)
+        self.conv1_ph = GCNConv(hidden_GCN, hidden_GCN)
 
         if depth == 2:
             self.conv2_amp = GCNConv(hidden_GCN, hidden_GCN)
@@ -190,17 +186,11 @@ class GNN(torch.nn.Module):
             edges_ph = self.edge_weight_ph.repeat(self.b_size).sigmoid()
         else:
             edges_amp, edges_ph = None, None
-        # amp = self.conv1_amp(amp, edge_index, edges_amp).relu()
         amp = self.conv1_amp(amp, edge_index).relu()
-        # ph = self.conv1_ph(ph, edge_index, edges_ph).relu()
         ph = self.conv1_ph(ph, edge_index).relu()
-        # x = self.conv1(x, edge_index)
         if self.depth == 2:
             amp = self.conv2_amp(amp, edge_index).relu()
-            # amp = self.conv2_amp(amp, edge_index, edges_amp).relu()
             ph = self.conv2_ph(ph, edge_index).relu()
-            # ph = self.conv2_ph(ph, edge_index, edges_ph).relu()
-        # CONV1D HERE
 
         amp = global_mean_pool(amp, batch)  # [batch_size, hidden_channels]
         ph = global_mean_pool(ph, batch)
@@ -269,9 +259,6 @@ class MyOwnDataset(Dataset):
             if adj_matrix[iy, ix] != 0:
                 source_nodes.append(ix)
                 target_nodes.append(iy)
-                # edge_list.append(adj_matrix[iy, ix])
-                # if adj_matrix[iy, ix] != 0:
-                # unweighted solution
                 edge_list.append(1.0)
         return source_nodes, target_nodes, edge_list
 
@@ -279,19 +266,11 @@ class MyOwnDataset(Dataset):
         idx = 0
         source_vert, target_vert, edge_list = self._create_cco_matrix()
         edge_idx = torch.tensor([source_vert, target_vert])
-        # DEBUG ROW
-        # _, small_data = train_test_split(self.data, test_size=0.1, random_state=42)
         small_data = self.data
         train_data, test_data = train_test_split(small_data, test_size=0.1, random_state=42)
         print(len(train_data), len(test_data))
         data = train_data if self.is_train else test_data
         for file in data:
-            # if os.path.exists(osp.join(self.processed_dir,
-            #                               f'data_{idx}_is_train_{self.is_train}_loops={self.allow_loops}'
-            #                               f'_isoc={self.iso_amount}_split={self.split_amount}.pt')):
-            #     print('skip')
-            # continue
-            # Read data from `raw_path`.
             amp, phase, target = np.load(file, allow_pickle=True)
             try:
                 amp = [torch.tensor(item).float() for item in amp]
@@ -383,11 +362,6 @@ if __name__ == '__main__':
                                  split_amount=21 if model_params['num_blocks'] == 3 else 85)
     test_dataset = MyOwnDataset(save_root, files, is_train=False, iso_amount=model_params['iso_amount'],
                                 split_amount=21 if model_params['num_blocks'] == 3 else 85)
-    print(train_dataset[0])
-    print(train_dataset[0].edge_attrs())
-    print('fffff')
-    # print(train_dataset[0].x)
-    # print(vars(train_dataset[0]))
     graph = train_dataset[0].edge_attr
 
     model = GNN(num_classes=2, hidden_encoder=model_params['hidden_encoder_embed'], edge_weight=graph,
@@ -400,7 +374,6 @@ if __name__ == '__main__':
     # for name, param in model.named_parameters():
     #     print(name, param.shape, param.numel())
     print(sum(p.numel() for p in model.parameters()), 'sum')
-    # exit(0)
     optimizer = torch.optim.AdamW(model.parameters())
     criterion = torch.nn.CrossEntropyLoss()
     scheduler = ReduceLROnPlateau(optimizer, 'min')
